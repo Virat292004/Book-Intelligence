@@ -174,48 +174,61 @@ async def get_recommendations(book_id: str, limit: int = Query(default=5, ge=1, 
 @router.post("/scrape", response_model=ScrapeResponse)
 async def scrape_and_store(request: ScrapeRequest, background_tasks: BackgroundTasks):
     """
-    Trigger book scraping pipeline.
-    1. Scrape books from the web
-    2. Store new books in MongoDB
-    3. Generate AI insights
-    4. Store embeddings in ChromaDB
+    Trigger scraping in background (non-blocking)
     """
     logger.info(f"Scrape triggered: max_pages={request.max_pages}")
 
-    scraped_books = scrape_books(
-        max_pages=request.max_pages,
-        genre_filter=request.genre_filter,
+    background_tasks.add_task(
+        _scrape_pipeline,
+        request.max_pages,
+        request.genre_filter
     )
-
-    added = 0
-    for raw_book in scraped_books:
-        # Deduplicate by URL
-        existing = await get_book_by_url(raw_book.get("book_url", ""))
-        if existing:
-            continue
-
-        # Generate AI insights
-        try:
-            insights = generate_book_insights(raw_book)
-            raw_book["ai_insights"] = insights
-        except Exception as e:
-            logger.warning(f"Insight generation failed for {raw_book.get('title')}: {e}")
-            raw_book["ai_insights"] = {}
-
-        # Save to MongoDB
-        created = await create_book(raw_book)
-        added += 1
-
-        # Store embeddings in background
-        background_tasks.add_task(_store_embeddings_task, created)
 
     return ScrapeResponse(
-        message=f"Scraping complete. {added} new books added.",
-        books_scraped=len(scraped_books),
-        books_added=added,
+        message="Scraping started in background",
+        books_scraped=0,
+        books_added=0,
     )
 
+async def _scrape_pipeline(max_pages: int, genre_filter: str | None):
+    """
+    Full scraping pipeline (runs in background)
+    """
+    try:
+        scraped_books = scrape_books(
+            max_pages=max_pages,
+            genre_filter=genre_filter,
+        )
 
+        added = 0
+
+        for raw_book in scraped_books:
+
+            # Deduplicate
+            existing = await get_book_by_url(raw_book.get("book_url", ""))
+            if existing:
+                continue
+
+            # Generate AI insights (slow but OK in background)
+            try:
+                insights = generate_book_insights(raw_book)
+                raw_book["ai_insights"] = insights
+            except Exception as e:
+                logger.warning(f"Insight failed: {e}")
+                raw_book["ai_insights"] = {}
+
+            # Save to DB
+            created = await create_book(raw_book)
+            added += 1
+
+            # Store embeddings (also async)
+            await _store_embeddings_task(created)
+
+        logger.info(f"✅ Scraping finished. Added {added} books")
+
+    except Exception as e:
+        logger.error(f"❌ Scraping pipeline failed: {e}")
+        
 async def _store_embeddings_task(book: dict):
     """Background task: store book embeddings in ChromaDB."""
     try:

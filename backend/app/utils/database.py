@@ -17,16 +17,27 @@ db = None
 async def connect_db():
     """Create MongoDB connection on startup."""
     global client, db
-    client = motor.motor_asyncio.AsyncIOMotorClient(settings.MONGODB_URL)
-    db = client[settings.DATABASE_NAME]
+    try:
+        client = motor.motor_asyncio.AsyncIOMotorClient(
+            settings.MONGODB_URL,
+            serverSelectionTimeoutMS=5000  # fail fast
+        )
+        db = client[settings.DATABASE_NAME]
 
-    # Create indexes for faster queries
-    await db.books.create_index("title")
-    await db.books.create_index("author")
-    await db.books.create_index("genre")
-    await db.books.create_index("created_at")
-    print(f"✅ Connected to MongoDB: {settings.DATABASE_NAME}")
+        # 🔥 VERY IMPORTANT: force connection check
+        await client.admin.command("ping")
 
+        # Create indexes
+        await db.books.create_index("title")
+        await db.books.create_index("author")
+        await db.books.create_index("genre")
+        await db.books.create_index("created_at")
+
+        print(f"✅ Connected to MongoDB: {settings.DATABASE_NAME}")
+
+    except Exception as e:
+        print("❌ MongoDB Connection Failed:", e)
+        raise e   # stop app if DB fails
 
 async def disconnect_db():
     """Close MongoDB connection on shutdown."""
@@ -38,6 +49,9 @@ async def disconnect_db():
 
 def get_db():
     """Return the database instance."""
+    if db is None:
+        raise Exception("Database not initialized. Did you call connect_db()?")
+
     return db
 
 
